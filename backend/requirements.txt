@@ -1,0 +1,5 @@
+# Add Python dependencies here.
+fastapi==0.162.0
+uvicorn[standard]==0.53.0
+psycopg[binary]==3.3.6
+httpx==0.28.1
