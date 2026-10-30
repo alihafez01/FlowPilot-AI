@@ -1,5 +1,5 @@
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal
 
 class ICPConfig(BaseModel):
     """
@@ -21,6 +21,12 @@ class ICPConfig(BaseModel):
         min_length=1,
         max_length=5,
     )
+
+    website_filter: Literal[
+    "with_website",
+    "without_website",
+    "any"
+    ] = "any"
 
     company_types: list[str] = Field(
         default_factory=lambda: ["agency"],
@@ -122,3 +128,17 @@ class ICPConfig(BaseModel):
                 seen.add(item)
 
         return cleaned
+
+
+    @model_validator(mode="after")
+    def validate_website_discovery_scope(self):
+        if (
+            self.website_filter in ("without_website", "any")
+            and len(self.target_geographies) != 1
+        ):
+            raise ValueError(
+                "Website-less discovery currently supports "
+                "one city or locality per run."
+            )
+
+        return self

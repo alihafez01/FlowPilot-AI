@@ -451,3 +451,82 @@ CREATE INDEX IF NOT EXISTS idx_company_sources_run
 
 CREATE INDEX IF NOT EXISTS idx_company_sources_domain
     ON company_sources (source_domain);
+
+
+
+-- Phase 2.1: Unified website-aware discovery
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS identity_key TEXT;
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS website_status TEXT
+NOT NULL DEFAULT 'unknown';
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS location_text TEXT;
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
+
+ALTER TABLE companies
+ADD COLUMN IF NOT EXISTS phone TEXT;
+
+
+UPDATE companies
+SET identity_key = 'domain:' || normalized_domain
+WHERE identity_key IS NULL
+  AND normalized_domain IS NOT NULL;
+
+UPDATE companies
+SET website_status = 'with_website'
+WHERE normalized_domain IS NOT NULL;
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_companies_identity_key
+ON companies(identity_key)
+WHERE identity_key IS NOT NULL;
+
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'companies_website_status_check'
+    ) THEN
+        ALTER TABLE companies
+        ADD CONSTRAINT companies_website_status_check
+        CHECK (
+            website_status IN (
+                'with_website',
+                'without_website_candidate',
+                'unknown'
+            )
+        );
+    END IF;
+END;
+$$;
+
+
+-- Identify the origin of every evidence source.
+ALTER TABLE company_sources
+ADD COLUMN IF NOT EXISTS source_type TEXT
+NOT NULL DEFAULT 'official_website';
+
+ALTER TABLE company_sources
+ADD COLUMN IF NOT EXISTS metadata JSONB
+NOT NULL DEFAULT '{}'::jsonb;
+
+
+-- Cache public OpenStreetMap responses to avoid repeated requests.
+CREATE TABLE IF NOT EXISTS osm_cache (
+    cache_key TEXT PRIMARY KEY,
+    payload JSONB NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_osm_cache_fetched
+ON osm_cache(fetched_at);

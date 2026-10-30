@@ -17,6 +17,7 @@ from app.services.discovery import (
     list_companies,
     list_company_sources,
 )
+from app.services.osm import OSMError
 
 
 APP_NAME = "FlowPilot AI API"
@@ -162,6 +163,13 @@ def discover_companies(icp: ICPConfig):
             detail=exc.message,
         ) from None
 
+    except OSMError as exc:
+        logger.warning("OSM discovery failed: %s", str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from None
+
 
 @app.get(
     "/api/v1/discovery/runs/{run_id}",
@@ -197,12 +205,17 @@ def read_companies(
         default=None,
         pattern="^(candidate|likely_official|needs_review|rejected)$",
     ),
+    website_status: str | None = Query(
+        default=None,
+        pattern="^(with_website|without_website_candidate|unknown)$",
+    ),
 ):
     try:
         items = list_companies(
             limit=limit,
             offset=offset,
             validation_status=website_validation_status,
+            website_status=website_status,
         )
 
         return {

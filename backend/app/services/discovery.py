@@ -14,6 +14,11 @@ from psycopg.types.json import Jsonb
 from app.schemas.discovery import ICPConfig
 from app.services.tavily import TavilyAPIError, TavilyClient
 
+from app.services.osm import (
+    OSMError,
+    execute_osm_discovery,
+)
+
 
 BLOCKED_DOMAINS = {
     "linkedin.com",
@@ -361,7 +366,7 @@ def _update_run(
         )
 
 
-def execute_discovery(icp: ICPConfig) -> dict:
+def execute_website_discovery(icp: ICPConfig) -> dict:
     api_key = os.getenv("TAVILY_API_KEY", "").strip()
 
     if not api_key:
@@ -665,7 +670,9 @@ def execute_discovery(icp: ICPConfig) -> dict:
                         INSERT INTO companies (
                             name,
                             normalized_domain,
+                            identity_key,
                             website_url,
+                            website_status,
                             industry,
                             description,
                             services,
@@ -673,11 +680,13 @@ def execute_discovery(icp: ICPConfig) -> dict:
                             website_validation_status
                         )
                         VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT (normalized_domain)
                         DO UPDATE SET
+                            identity_key = EXCLUDED.identity_key,
                             website_url = EXCLUDED.website_url,
+                            website_status = 'with_website',
                             industry = COALESCE(
                                 EXCLUDED.industry,
                                 companies.industry
@@ -722,7 +731,9 @@ def execute_discovery(icp: ICPConfig) -> dict:
                         (
                             company_name,
                             domain,
+                            f"domain:{domain}",
                             f"https://{domain}",
+                            "with_website",
                             industry,
                             description,
                             Jsonb(matched_services),
@@ -768,11 +779,13 @@ def execute_discovery(icp: ICPConfig) -> dict:
                                 source_status,
                                 extraction_status,
                                 extracted_content,
-                                content_sha256
+                                content_sha256,
+                                source_type,
+                                metadata
                             )
                             VALUES (
-                                %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s
                             )
                             ON CONFLICT (
                                 company_id,
@@ -785,6 +798,8 @@ def execute_discovery(icp: ICPConfig) -> dict:
                                 source_score = EXCLUDED.source_score,
                                 source_status = EXCLUDED.source_status,
                                 extraction_status = EXCLUDED.extraction_status,
+                                source_type = EXCLUDED.source_type,
+                                metadata = EXCLUDED.metadata,
                                 extracted_content = COALESCE(
                                     EXCLUDED.extracted_content,
                                     company_sources.extracted_content
@@ -809,6 +824,8 @@ def execute_discovery(icp: ICPConfig) -> dict:
                                 candidate["extraction_status"],
                                 content,
                                 content_hash,
+                                "official_website",
+                                Jsonb({}),
                             ),
                         )
 
@@ -891,6 +908,7 @@ def list_companies(
     limit: int,
     offset: int,
     validation_status: str | None = None,
+    website_status: str | None = None,
 ) -> list[dict]:
     sql = """
         SELECT
@@ -898,6 +916,11 @@ def list_companies(
             name,
             normalized_domain,
             website_url,
+            website_status,
+            location_text,
+            latitude,
+            longitude,
+            phone,
             industry,
             description,
             services,
@@ -912,6 +935,14 @@ def list_companies(
     if validation_status:
         sql += " WHERE website_validation_status = %s"
         parameters.append(validation_status)
+
+    if website_status:
+        sql += (
+            " AND website_status = %s"
+            if " WHERE " in sql
+            else " WHERE website_status = %s"
+        )
+        parameters.append(website_status)
 
     sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
     parameters.extend([limit, offset])
@@ -961,3 +992,77 @@ def list_company_sources(
         ).fetchall()
 
     return [dict(row) for row in rows]
+
+
+
+def execute_discovery(icp: ICPConfig) -> dict:
+
+    # Mode 1: Businesses with official websites
+    if icp.website_filter == "with_website":
+        return execute_website_discovery(
+            icp.model_copy(
+                update={"website_filter": "with_website"}
+            )
+        )
+
+    # Mode 2: Businesses without a website recorded in OSM
+    if icp.website_filter == "without_website":
+        return execute_osm_discovery(
+            icp.model_copy(
+                update={"website_filter": "without_website"}
+            )
+        )
+
+    # Mode 3: Preserve results from either provider if the other fails.
+    try:
+        website_result = execute_website_discovery(
+            icp.model_copy(
+                update={"website_filter": "with_website"}
+            )
+        )
+    except DiscoveryServiceError as exc:
+        website_result = {
+            "status": "failed",
+            "errors": [{"message": exc.message}],
+            "companies": [],
+        }
+
+    try:
+        no_website_result = execute_osm_discovery(
+            icp.model_copy(
+                update={"website_filter": "without_website"}
+            )
+        )
+    except OSMError as exc:
+        no_website_result = {
+            "status": "failed",
+            "errors": [{"message": str(exc)}],
+            "companies": [],
+        }
+
+    all_companies = (
+        website_result.get("companies", [])
+        + no_website_result.get("companies", [])
+    )
+
+    statuses = {
+        website_result.get("status"),
+        no_website_result.get("status"),
+    }
+
+    overall_status = (
+        "completed"
+        if statuses == {"completed"}
+        else "partial"
+        if "completed" in statuses or "partial" in statuses
+        else "failed"
+    )
+
+    return {
+        "status": overall_status,
+        "website_filter": "any",
+        "website_run": website_result,
+        "website_less_run": no_website_result,
+        "companies_upserted": len(all_companies),
+        "companies": all_companies,
+    }
