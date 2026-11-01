@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from app.schemas.discovery import ICPConfig
 from app.services.tavily import TavilyAPIError, TavilyClient
+from app.services.source_classification import classify_page_kind
 
 from app.services.osm import (
     OSMError,
@@ -50,7 +51,6 @@ TRACKING_PARAMETERS = {
     "ref",
     "ref_source",
 }
-
 
 class DiscoveryServiceError(Exception):
     def __init__(self, status_code: int, message: str):
@@ -337,6 +337,7 @@ def _update_run(
     status: str,
     results_count: int,
     companies_upserted: int,
+    discovery_pages_saved: int,
     extracted_count: int,
     credits: int,
     errors: list[dict],
@@ -348,6 +349,7 @@ def _update_run(
             SET status = %s,
                 results_count = %s,
                 companies_upserted = %s,
+                discovery_pages_saved = %s,
                 extracted_count = %s,
                 tavily_credits = %s,
                 errors = %s,
@@ -358,6 +360,7 @@ def _update_run(
                 status,
                 results_count,
                 companies_upserted,
+                discovery_pages_saved,
                 extracted_count,
                 credits,
                 Jsonb(errors),
@@ -467,9 +470,11 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
                             result.get("published_date") or ""
                         )[:100],
                         "query": query,
+                        "page_kind": "business_website",
                         "extracted_content": None,
                         "extraction_status": "not_requested",
                     }
+                    candidate["page_kind"] = classify_page_kind(candidate)
 
                     existing = candidates_by_url.get(source_url)
 
@@ -485,13 +490,30 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
                 domain = candidate["domain"]
                 existing = best_by_domain.get(domain)
 
-                if existing is None or candidate["score"] > existing["score"]:
+                candidate_is_business = (
+                    candidate.get("page_kind") == "business_website"
+                )
+                existing_is_business = (
+                    existing is not None
+                    and existing.get("page_kind") == "business_website"
+                )
+
+                if (
+                    existing is None
+                    or (candidate_is_business and not existing_is_business)
+                    or (
+                        candidate_is_business == existing_is_business
+                        and candidate["score"] > existing["score"]
+                    )
+                ):
                     best_by_domain[domain] = candidate
 
             extraction_targets = sorted(
                 best_by_domain.values(),
-                key=lambda item: item["score"],
-                reverse=True,
+                key=lambda item: (
+                    item.get("page_kind") != "business_website",
+                    -item["score"],
+                ),
             )[:icp.extract_top_n]
 
             if extraction_targets:
@@ -575,8 +597,16 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
 
     candidates = list(candidates_by_url.values())
     grouped_by_domain: dict[str, list[dict]] = {}
+    page_candidates = []
 
     for candidate in candidates:
+        if candidate.get("page_kind") in {
+            "discovery_page",
+            "directory_listing",
+        }:
+            page_candidates.append(candidate)
+            continue
+
         grouped_by_domain.setdefault(candidate["domain"], []).append(
             candidate
         )
@@ -590,6 +620,7 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
             len(candidates),
             0,
             0,
+            0,
             credits,
             errors,
         )
@@ -600,6 +631,8 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
             "queries_executed": len(queries),
             "source_results": len(candidates),
             "companies_upserted": 0,
+            "discovery_pages_saved": 0,
+            "discovery_pages": [],
             "extracted_urls": 0,
             "tavily_credits": credits,
             "errors": errors,
@@ -613,9 +646,83 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
     )
 
     company_previews = []
+    discovery_page_previews = []
 
     try:
         with psycopg.connect(database_url) as connection:
+            # Preserve directory/listicle pages as research sources. They are
+            # deliberately not converted into company leads.
+            for candidate in page_candidates:
+                content = candidate.get("extracted_content")
+                content_hash = (
+                    hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if content
+                    else None
+                )
+                page_kind = candidate["page_kind"]
+
+                connection.execute(
+                    """
+                    INSERT INTO discovery_pages (
+                        discovery_run_id,
+                        source_url,
+                        source_domain,
+                        source_query,
+                        title,
+                        snippet,
+                        published_date,
+                        source_score,
+                        page_type,
+                        extraction_status,
+                        extracted_content,
+                        content_sha256,
+                        metadata
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (discovery_run_id, source_url)
+                    DO UPDATE SET
+                        title = EXCLUDED.title,
+                        snippet = EXCLUDED.snippet,
+                        source_score = EXCLUDED.source_score,
+                        extraction_status = EXCLUDED.extraction_status,
+                        extracted_content = COALESCE(
+                            EXCLUDED.extracted_content,
+                            discovery_pages.extracted_content
+                        ),
+                        content_sha256 = COALESCE(
+                            EXCLUDED.content_sha256,
+                            discovery_pages.content_sha256
+                        ),
+                        last_seen_at = now()
+                    """,
+                    (
+                        run_id,
+                        candidate["url"],
+                        candidate["domain"],
+                        candidate["query"],
+                        candidate["title"],
+                        candidate["snippet"],
+                        candidate["published_date"],
+                        candidate["score"],
+                        page_kind,
+                        candidate["extraction_status"],
+                        content,
+                        content_hash,
+                        Jsonb({"classification": "non_company_discovery_source"}),
+                    ),
+                )
+
+                discovery_page_previews.append({
+                    "source_url": candidate["url"],
+                    "source_domain": candidate["domain"],
+                    "page_type": page_kind,
+                    "title": candidate["title"],
+                    "extraction_status": candidate["extraction_status"],
+                })
+
             for domain, domain_candidates in grouped_by_domain.items():
                 best = max(
                     domain_candidates,
@@ -763,6 +870,11 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
                                 else "candidate"
                             )
                         )
+                        source_type = (
+                            "official_website"
+                            if source_status == "likely_official"
+                            else "website_candidate"
+                        )
 
                         cursor.execute(
                             """
@@ -824,8 +936,8 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
                                 candidate["extraction_status"],
                                 content,
                                 content_hash,
-                                "official_website",
-                                Jsonb({}),
+                                source_type,
+                                Jsonb({"classification": "business_website_candidate"}),
                             ),
                         )
 
@@ -849,6 +961,7 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
             "failed",
             len(candidates),
             0,
+            len(discovery_page_previews),
             extracted_count,
             credits,
             errors + [
@@ -873,6 +986,7 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
         status,
         len(candidates),
         len(company_previews),
+        len(discovery_page_previews),
         extracted_count,
         credits,
         errors,
@@ -884,6 +998,8 @@ def execute_website_discovery(icp: ICPConfig) -> dict:
         "queries_executed": search_successes,
         "source_results": len(candidates),
         "companies_upserted": len(company_previews),
+        "discovery_pages_saved": len(discovery_page_previews),
+        "discovery_pages": discovery_page_previews,
         "extracted_urls": extracted_count,
         "tavily_credits": credits,
         "errors": errors,
@@ -929,19 +1045,16 @@ def list_companies(
             created_at,
             updated_at
         FROM companies
+        WHERE record_type = 'business'
     """
     parameters = []
 
     if validation_status:
-        sql += " WHERE website_validation_status = %s"
+        sql += " AND website_validation_status = %s"
         parameters.append(validation_status)
 
     if website_status:
-        sql += (
-            " AND website_status = %s"
-            if " WHERE " in sql
-            else " WHERE website_status = %s"
-        )
+        sql += " AND website_status = %s"
         parameters.append(website_status)
 
     sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
@@ -978,6 +1091,8 @@ def list_company_sources(
                 published_date,
                 source_score,
                 source_status,
+                source_type,
+                metadata,
                 extraction_status,
                 LEFT(extracted_content, 5000) AS extracted_content,
                 content_sha256,
@@ -1064,5 +1179,6 @@ def execute_discovery(icp: ICPConfig) -> dict:
         "website_run": website_result,
         "website_less_run": no_website_result,
         "companies_upserted": len(all_companies),
+        "discovery_pages_saved": website_result.get("discovery_pages_saved", 0),
         "companies": all_companies,
     }

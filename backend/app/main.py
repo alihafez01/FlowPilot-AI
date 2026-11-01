@@ -20,6 +20,21 @@ from app.services.discovery import (
 from app.services.osm import OSMError
 
 
+from app.schemas.quality import (
+    EmailValidationRequest,
+    EmailValidationResult,
+    QualityRunRequest,
+)
+
+from app.services.email_validation import (
+    validate_email_address,
+)
+
+from app.services.quality_pipeline import (
+    run_quality_pipeline,
+)
+
+
 APP_NAME = "FlowPilot AI API"
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 
@@ -258,4 +273,105 @@ def read_company_sources(
         raise HTTPException(
             status_code=500,
             detail="Could not retrieve company sources.",
+        ) from None
+
+
+
+
+@app.post(
+    "/api/v1/quality/validate-email",
+    tags=["quality"],
+)
+def validate_single_email(
+    request: EmailValidationRequest,
+):
+    result = validate_email_address(
+        raw_email=request.email,
+        check_dns=request.check_dns,
+    )
+
+    return EmailValidationResult.model_validate(
+        result
+    ).model_dump()
+
+
+@app.post(
+    "/api/v1/quality/run",
+    tags=["quality"],
+)
+def execute_quality_run(
+    request: QualityRunRequest,
+):
+    try:
+        return run_quality_pipeline(request)
+
+    except RuntimeError:
+        logger.exception("Quality pipeline failed.")
+        raise HTTPException(
+            status_code=500,
+            detail="Quality pipeline execution failed.",
+        ) from None
+
+    except psycopg.Error:
+        logger.exception("Quality database operation failed.")
+        raise HTTPException(
+            status_code=500,
+            detail="Quality database operation failed.",
+        ) from None
+
+
+@app.get(
+    "/api/v1/quality/duplicates",
+    tags=["quality"],
+)
+def read_duplicate_candidates(
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    try:
+        with psycopg.connect(DATABASE_URL) as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    d.id,
+                    d.company_a_id,
+                    a.name AS company_a_name,
+                    d.company_b_id,
+                    b.name AS company_b_name,
+                    d.similarity_score,
+                    d.match_reason,
+                    d.status,
+                    d.created_at
+                FROM company_duplicate_candidates d
+                JOIN companies a ON a.id = d.company_a_id
+                JOIN companies b ON b.id = d.company_b_id
+                WHERE d.status = 'pending'
+                ORDER BY d.similarity_score DESC
+                LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+
+        return {
+            "count": len(rows),
+            "duplicates": [
+                {
+                    "id": str(row[0]),
+                    "company_a_id": str(row[1]),
+                    "company_a_name": row[2],
+                    "company_b_id": str(row[3]),
+                    "company_b_name": row[4],
+                    "similarity_score": float(row[5]),
+                    "match_reason": row[6],
+                    "status": row[7],
+                    "created_at": row[8].isoformat(),
+                }
+                for row in rows
+            ],
+        }
+
+    except psycopg.Error:
+        logger.exception("Could not retrieve duplicate candidates.")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve duplicate candidates.",
         ) from None

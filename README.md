@@ -156,9 +156,9 @@ query, and 5 extracted URLs (the highest-ranked candidate per domain). The
 included workflow uses a smaller one-query, three-result, one-extraction
 example. Results are deduplicated by normalized source URL/domain, blocked
 directory/social domains are excluded, and website status is heuristic.
-The current pipeline discovers and stores company/source evidence; it does
-not verify legal identity, guarantee contact details, or perform email
-validation or outreach.
+The Phase 2 discovery pipeline discovers and stores company/source evidence;
+it does not verify legal identity, guarantee contact details, or perform
+email validation or outreach. Email validation is covered by Phase 3.
 
 ### Initial measured run
 
@@ -178,3 +178,47 @@ the example ICP above with `max_queries=1`, `max_results_per_query=3`, and
 | Errors | 0 |
 
 These are a single observed run, not a throughput or quality guarantee.
+
+## Phase 3 — Data Quality & Qualification
+
+### Email Validation
+
+- Email syntax validation
+- Email normalization
+- MX record checks
+- A/AAAA fallback checks
+- DNS error handling
+- Role-based email detection
+- Mailbox verification explicitly unsupported
+
+### Deduplication
+
+- Normalized domain matching
+- Provider identity matching
+- Case-insensitive email deduplication key
+- Fuzzy business-name matching
+- Manual duplicate review queue
+
+### Lead Qualification
+
+- Industry match: 30 points
+- Service relevance: 25 points
+- Business evidence: 20 points
+- Profile completeness: 10 points
+- Contact quality: 15 points
+
+### Testing
+
+- pytest unit tests
+- Mocked DNS responses
+- Email validation tests
+- Deduplication tests
+- Scoring tests
+- Pydantic schema tests
+
+### Important Limitations
+
+- MX records do not prove individual mailbox existence.
+- DNS failures are treated as unknown, not invalid.
+- Fuzzy matches require manual review.
+- Website availability does not determine lead quality.

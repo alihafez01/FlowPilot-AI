@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-10-30T04:01:34.127Z",
+  "updatedAt": "2026-11-01T19:34:58.659Z",
   "createdAt": "2026-10-30T03:56:52.268Z",
   "id": "dqeAPK11OJqxqPAt",
   "name": "FlowPilot AI — Lead Discovery",
@@ -24,7 +24,7 @@
         "url": "http://api:8000/api/v1/discovery/search",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{\n  \"target_industries\": [\"web development agency\"],\n  \"target_geographies\": [\"Austin, Texas, United States\"],\n  \"company_types\": [\"agency\"],\n  \"service_keywords\": [\"web development\", \"AI automation\"],\n  \"additional_keywords\": [\"B2B\"],\n  \"include_domains\": [],\n  \"exclude_domains\": [],\n  \"max_queries\": 1,\n  \"max_results_per_query\": 3,\n  \"extract_top_n\": 1\n}",
+        "jsonBody": "{\n  \"target_industries\": [\"web development agency\"],\n  \"target_geographies\": [\"Austin, Texas, United States\"],\n  \"company_types\": [\"agency\"],\n  \"service_keywords\": [\"web development\", \"AI automation\"],\n  \"additional_keywords\": [\"B2B\"],\n  \"include_domains\": [],\n  \"exclude_domains\": [],\n  \"max_queries\": 1,\n  \"max_results_per_query\": 3,\n  \"website_filter\": \"without_website\",\n  \"extract_top_n\": 1\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -35,6 +35,24 @@
       ],
       "id": "20f68cc7-3587-4b2b-9018-40a6fd6e768d",
       "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/api/v1/quality/run",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"target_industries\": [\n    \"web development agency\",\n    \"digital marketing agency\"\n  ],\n  \"service_keywords\": [\n    \"web development\",\n    \"AI automation\",\n    \"e-commerce\"\n  ],\n  \"evidence_keywords\": [\n    \"automation\",\n    \"custom software\"\n  ],\n  \"company_limit\": 50,\n  \"check_dns\": true,\n  \"duplicate_threshold\": 92\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        448,
+        0
+      ],
+      "id": "7b5e0e8d-4fb1-4404-8dd3-170889e8d181",
+      "name": "HTTP Request1"
     }
   ],
   "connections": {
@@ -43,6 +61,17 @@
         [
           {
             "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
             "type": "main",
             "index": 0
           }
@@ -58,9 +87,9 @@
   "meta": null,
   "nodeGroups": [],
   "pinData": {},
-  "versionId": "b12721b9-93e5-49f8-a41d-f6711a8173d8",
+  "versionId": "8b5d3625-6903-4cf4-a45b-4b20c7bac8e9",
   "activeVersionId": null,
-  "versionCounter": 7,
+  "versionCounter": 15,
   "triggerCount": 0,
   "sourceWorkflowId": null,
   "shared": [
@@ -108,5 +137,5 @@
     "workflow:unshare",
     "workflow:update"
   ],
-  "checksum": "703375d512a8075370cb673d4efc6790eec5c3128e23a947528ebf4294ec0fd0"
+  "checksum": "d616fbe809ea14e67ad910c4c309a9868d626c1898ed1d528c9b970fc670aa76"
 }

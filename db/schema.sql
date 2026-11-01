@@ -68,15 +68,9 @@ CREATE TABLE IF NOT EXISTS contacts (
 
     CHECK (
         normalized_email IS NULL
-        OR normalized_email = lower(btrim(normalized_email))
+        OR normalized_email = btrim(normalized_email)
     )
 );
-
--- Avoid creating two contact records for the same normalized email.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_normalized_email
-    ON contacts (normalized_email)
-    WHERE normalized_email IS NOT NULL
-      AND normalized_email <> '';
 
 CREATE INDEX IF NOT EXISTS idx_contacts_company_id
     ON contacts (company_id);
@@ -530,3 +524,170 @@ CREATE TABLE IF NOT EXISTS osm_cache (
 
 CREATE INDEX IF NOT EXISTS idx_osm_cache_fetched
 ON osm_cache(fetched_at);
+
+
+
+-- Phase 3: Data quality
+
+-- Email validation metadata
+ALTER TABLE contacts
+ADD COLUMN IF NOT EXISTS email_dns_status TEXT
+NOT NULL DEFAULT 'not_checked';
+
+ALTER TABLE contacts
+ADD COLUMN IF NOT EXISTS email_validation_reason TEXT;
+
+ALTER TABLE contacts
+ADD COLUMN IF NOT EXISTS email_validated_at TIMESTAMPTZ;
+
+ALTER TABLE contacts
+ADD COLUMN IF NOT EXISTS is_role_account BOOLEAN
+NOT NULL DEFAULT FALSE;
+
+
+-- Expand the original status constraint.
+ALTER TABLE contacts
+DROP CONSTRAINT IF EXISTS contacts_email_validation_status_check;
+
+ALTER TABLE contacts
+ADD CONSTRAINT contacts_email_validation_status_check
+CHECK (
+    email_validation_status IN (
+        'missing',
+        'unknown',
+        'syntax_valid',
+        'mx_valid',
+        'dns_fallback_valid',
+        'no_mail_route',
+        'dns_error',
+        'invalid',
+        'risky',
+        'verified'
+    )
+);
+
+
+ALTER TABLE contacts
+DROP CONSTRAINT IF EXISTS contacts_email_dns_status_check;
+
+ALTER TABLE contacts
+ADD CONSTRAINT contacts_email_dns_status_check
+CHECK (
+    email_dns_status IN (
+        'not_checked',
+        'mx_valid',
+        'dns_fallback_valid',
+        'no_mail_route',
+        'dns_error'
+    )
+);
+
+
+-- Scoring component breakdown
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS industry_score SMALLINT DEFAULT 0;
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS service_score SMALLINT DEFAULT 0;
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS evidence_score SMALLINT DEFAULT 0;
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS completeness_score SMALLINT DEFAULT 0;
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS contact_score SMALLINT DEFAULT 0;
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS scoring_version TEXT DEFAULT 'v1';
+
+
+-- Pending fuzzy-match suggestions.
+CREATE TABLE IF NOT EXISTS company_duplicate_candidates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    company_a_id UUID NOT NULL
+        REFERENCES companies(id) ON DELETE CASCADE,
+
+    company_b_id UUID NOT NULL
+        REFERENCES companies(id) ON DELETE CASCADE,
+
+    similarity_score NUMERIC(5,2) NOT NULL
+        CHECK (similarity_score BETWEEN 0 AND 100),
+
+    match_reason TEXT NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (
+            status IN (
+                'pending',
+                'confirmed_duplicate',
+                'not_duplicate',
+                'merged'
+            )
+        ),
+
+    reviewed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CHECK (company_a_id <> company_b_id),
+
+    UNIQUE (company_a_id, company_b_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_duplicate_candidates_status
+ON company_duplicate_candidates(status, similarity_score DESC);
+
+
+-- Keep provider-normalized addresses intact while deduplicating case-insensitively.
+ALTER TABLE contacts
+ADD COLUMN IF NOT EXISTS email_dedupe_key TEXT;
+
+UPDATE contacts
+SET email_dedupe_key = lower(btrim(normalized_email))
+WHERE email_dedupe_key IS NULL
+  AND normalized_email IS NOT NULL;
+
+ALTER TABLE contacts
+DROP CONSTRAINT IF EXISTS contacts_normalized_email_check;
+
+ALTER TABLE contacts
+DROP CONSTRAINT IF EXISTS contacts_normalized_email_trim_check;
+
+ALTER TABLE contacts
+ADD CONSTRAINT contacts_normalized_email_trim_check
+CHECK (
+    normalized_email IS NULL
+    OR normalized_email = btrim(normalized_email)
+);
+
+DROP INDEX IF EXISTS uq_contacts_normalized_email;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_contacts_email_dedupe_key
+ON contacts(email_dedupe_key)
+WHERE email_dedupe_key IS NOT NULL
+  AND email_dedupe_key <> '';
+
+
+
+
+-- Phase 3: scoring model v2
+
+ALTER TABLE lead_analyses
+ADD COLUMN IF NOT EXISTS opportunity_score SMALLINT
+NOT NULL DEFAULT 0;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'lead_analyses_opportunity_score_check'
+    ) THEN
+        ALTER TABLE lead_analyses
+        ADD CONSTRAINT lead_analyses_opportunity_score_check
+        CHECK (opportunity_score BETWEEN 0 AND 25);
+    END IF;
+END;
+$$;

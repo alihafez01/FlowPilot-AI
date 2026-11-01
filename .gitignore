@@ -11,9 +11,30 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # Local databases, logs and temporary data
 *.log
 *.sqlite3
 .DS_Store
 Thumbs.db
+
+# Local review, patch and database snapshot artifacts
+/README_APPLY_PATCH.md
+/flowpilot-before-discovery-classification.sql
+/flowpilot-code-review.zip
+/flowpilot-discovery-classification-patch.zip
+/flowpilot-quality-hotfix.zip
+/flowpilot-support-code.zip
+/flowpilot-hotfix/
+
+# Superseded local copies
+/backend/app/services/lead_scoring1.py
+/backend/app/services/quality_pipeline1.py
